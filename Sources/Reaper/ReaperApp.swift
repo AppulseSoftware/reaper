@@ -20,14 +20,18 @@ enum Entry {
 
     /// Print the current scan to stdout (handy for debugging detection).
     private static func dump() {
+        // A first scan gives the CPU baseline.
+        let scanner = ProcessScanner()
+        _ = scanner.scan()
+        Thread.sleep(forTimeInterval: 1)
         let start = Date()
-        let snap = ProcessScanner().scan()
+        let snap = scanner.scan()
         for job in snap.jobs {
             let via = job.via.map { " via \($0.rawValue)" } ?? ""
             let ports = job.ports.map { ":\($0)" }.joined(separator: " ")
             let ghost = job.isGhost ? " GHOST" : ""
             print("[\(job.harness.rawValue)\(via)\(ghost)] pid \(job.root.pid) \(ports.isEmpty ? "-" : ports)  \(job.command)")
-            print("    cwd: \(job.cwd ?? "?")  procs: \(job.processes.count)")
+            print("    cwd: \(job.cwd ?? "?")  procs: \(job.processes.count)  \(job.cpu.map(formatCPU) ?? "–") CPU  \(formatMemory(job.memory))")
         }
         print(String(format: "%d jobs, scan took %.0f ms", snap.jobs.count, Date().timeIntervalSince(start) * 1000))
     }

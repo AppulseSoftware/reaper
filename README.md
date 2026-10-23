@@ -23,6 +23,7 @@ Agents spin up `npm run dev`, test servers and background daemons, then move on.
 - **Grouped by agent:** each section shows the agent's own app icon.
 - **Ghosts first:** within each agent, ghosts (👻) come first, then the longest-running processes.
 - **Filters:** switch between *All* and *👻 Ghosts*, and optionally show only processes listening on a port.
+- **CPU and memory:** each row shows what its process tree uses, measured the way Activity Monitor does. Expand a row for a per-process breakdown.
 - **Ports:** click a port to open `http://localhost:<port>`. A 🌐 marks ports open on all network interfaces, not just localhost.
 - **Kill:** × stops the whole process tree with SIGTERM, and offers *Force* (SIGKILL) if it survives. ⌥-click × to force-kill straight away. Expand a row to kill individual subprocesses.
 - **Context menu:** copy the command or PID, or reveal the working directory in Finder.

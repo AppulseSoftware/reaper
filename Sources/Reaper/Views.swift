@@ -172,6 +172,14 @@ struct JobRow: View {
                         Text(verbatim: "pid \(job.root.pid)")
                         Text("·")
                         Text(uptime(since: job.root.started))
+                        if let cpu = job.cpu {
+                            Text("·")
+                            Text(verbatim: "\(formatCPU(cpu)) CPU")
+                        }
+                        if job.memory > 0 {
+                            Text("·")
+                            Text(verbatim: formatMemory(job.memory))
+                        }
                         if let via = job.via {
                             Text("· via \(via.rawValue)")
                         }
@@ -242,6 +250,13 @@ struct JobRow: View {
                     ForEach(Array(Set(p.ports.map(\.port))).sorted(), id: \.self) { port in
                         Text(verbatim: ":\(port)").font(.caption.monospacedDigit()).foregroundStyle(job.harness.color)
                     }
+                    // After the ports so the columns line up against the kill buttons.
+                    Group {
+                        Text(verbatim: p.cpu.map(formatCPU) ?? "").frame(width: 44, alignment: .trailing)
+                        Text(verbatim: p.memory > 0 ? formatMemory(p.memory) : "").frame(width: 60, alignment: .trailing)
+                    }
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
                     KillButton(size: .caption) {
                         store.kill(pid: p.pid, force: NSEvent.modifierFlags.contains(.option))
                     }
@@ -323,6 +338,15 @@ private func openPort(_ port: UInt16) {
 private func shortPath(_ path: String) -> String {
     let home = ProcessScanner.home
     return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+}
+
+/// Percent of one core, like Activity Monitor: "0.4%", "103.2%".
+func formatCPU(_ cpu: Double) -> String {
+    String(format: "%.1f%%", cpu)
+}
+
+func formatMemory(_ bytes: UInt64) -> String {
+    Int64(clamping: bytes).formatted(.byteCount(style: .memory))
 }
 
 private func uptime(since date: Date) -> String {

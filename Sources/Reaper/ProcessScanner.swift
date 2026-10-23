@@ -16,6 +16,10 @@ struct ProcInfo: Sendable {
     let markerEnv: [String: String]
     let started: Date
     var ports: [ListenPort] = []
+    /// Physical memory footprint in bytes, the figure Activity Monitor shows as Memory.
+    var memory: UInt64 = 0
+    /// Percent of one core since the previous scan (can exceed 100); nil on the first sighting.
+    var cpu: Double?
 
     var executableName: String {
         let first = args.first.map { ($0 as NSString).lastPathComponent } ?? (path as NSString).lastPathComponent
@@ -64,6 +68,14 @@ struct AgentJob: Identifiable, Sendable {
     func addresses(for port: UInt16) -> [String] {
         Array(Set(processes.flatMap { $0.ports.filter { $0.port == port }.map(\.address) })).sorted()
     }
+
+    var memory: UInt64 { processes.reduce(0) { $0 + $1.memory } }
+
+    /// Summed over the tree; nil until a second scan gives a baseline.
+    var cpu: Double? {
+        let samples = processes.compactMap(\.cpu)
+        return samples.isEmpty ? nil : samples.reduce(0, +)
+    }
 }
 
 struct Snapshot: Sendable {
@@ -76,6 +88,8 @@ final class ProcessScanner: @unchecked Sendable {
     private var argBuffer: [UInt8]
     private let myUID = getuid()
     private let myPID = getpid()
+    /// CPU time (ns) per process at the previous scan, to turn into a percentage.
+    private var cpuSamples: [pid_t: (started: Date, cpuTime: UInt64, at: UInt64)] = [:]
     static let home = NSHomeDirectory()
 
     init() {
@@ -146,12 +160,24 @@ final class ProcessScanner: @unchecked Sendable {
         var groups: [pid_t: [pid_t]] = [:]
         for pid in candidates.keys { groups[root(of: pid), default: []].append(pid) }
 
-        // 5. Build jobs, fetching ports/cwd only for what we show.
+        // 5. Build jobs, fetching ports/cwd/usage only for what we show.
+        let now = DispatchTime.now().uptimeNanoseconds
+        var samples: [pid_t: (started: Date, cpuTime: UInt64, at: UInt64)] = [:]
         var jobs: [AgentJob] = []
         for (rootPID, members) in groups {
             guard var rootInfo = procs[rootPID], let (harness, via) = candidates[rootPID] else { continue }
             var members = members.compactMap { procs[$0] }
-            for i in members.indices { members[i].ports = Self.listeningPorts(members[i].pid) }
+            for i in members.indices {
+                let p = members[i]
+                members[i].ports = Self.listeningPorts(p.pid)
+                guard let usage = Self.usage(p.pid) else { continue }
+                members[i].memory = usage.memory
+                if let prev = cpuSamples[p.pid], prev.started == p.started, now > prev.at {
+                    let used = usage.cpuTime >= prev.cpuTime ? usage.cpuTime - prev.cpuTime : 0
+                    members[i].cpu = Double(used) / Double(now - prev.at) * 100
+                }
+                samples[p.pid] = (p.started, usage.cpuTime, now)
+            }
             members.sort { $0.started < $1.started }
             if let rp = members.first(where: { $0.pid == rootPID }) { rootInfo = rp }
 
@@ -162,6 +188,7 @@ final class ProcessScanner: @unchecked Sendable {
                 isGhost: rootInfo.ppid == 1,
                 command: short, fullCommand: full, cwd: Self.cwd(rootPID)))
         }
+        cpuSamples = samples
         // Ghosts first, then longest running.
         jobs.sort {
             if $0.isGhost != $1.isGhost { return $0.isGhost }
@@ -278,6 +305,24 @@ final class ProcessScanner: @unchecked Sendable {
     static func path(_ pid: pid_t) -> String? {
         var buf = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
         return proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 ? String(cString: buf) : nil
+    }
+
+    private static let timebase: (numer: UInt64, denom: UInt64) = {
+        var tb = mach_timebase_info_data_t()
+        mach_timebase_info(&tb)
+        return (UInt64(tb.numer), UInt64(max(tb.denom, 1)))
+    }()
+
+    /// Memory footprint (bytes) and total user + system CPU time (ns).
+    static func usage(_ pid: pid_t) -> (memory: UInt64, cpuTime: UInt64)? {
+        var info = rusage_info_v4()
+        let ok = withUnsafeMutablePointer(to: &info) {
+            $0.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(pid, RUSAGE_INFO_V4, $0) }
+        }
+        guard ok == 0 else { return nil }
+        // CPU times are in mach ticks, not nanoseconds, on Apple silicon.
+        let ticks = info.ri_user_time + info.ri_system_time
+        return (info.ri_phys_footprint, ticks * timebase.numer / timebase.denom)
     }
 
     static func isAlive(_ pid: pid_t) -> Bool {
