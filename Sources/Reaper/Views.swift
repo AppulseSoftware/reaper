@@ -10,15 +10,25 @@ struct ContentView: View {
         VStack(spacing: 0) {
             header
             Divider()
-            if store.visibleJobs.isEmpty {
+            if isEmpty {
                 emptyState
             } else {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
-                        ForEach(Harness.allCases) { harness in
-                            let jobs = store.jobs(for: harness)
-                            if !jobs.isEmpty {
-                                HarnessSection(harness: harness, jobs: jobs)
+                        switch store.tab {
+                        case .processes:
+                            ForEach(Harness.allCases) { harness in
+                                let jobs = store.jobs(for: harness)
+                                if !jobs.isEmpty {
+                                    HarnessSection(harness: harness, jobs: jobs)
+                                }
+                            }
+                        case .worktrees:
+                            ForEach(Harness.allCases.map(Optional.some) + [Harness?.none], id: \.self) { harness in
+                                let worktrees = store.worktrees(for: harness)
+                                if !worktrees.isEmpty {
+                                    WorktreeSection(harness: harness, worktrees: worktrees)
+                                }
                             }
                         }
                     }
@@ -36,26 +46,76 @@ struct ContentView: View {
         .frame(width: 460)
     }
 
+    private var isEmpty: Bool {
+        switch store.tab {
+        case .processes: store.visibleJobs.isEmpty
+        case .worktrees: store.visibleWorktrees.isEmpty
+        }
+    }
+
+    /// Native controls only: a segmented control for the view, push-on/push-off buttons for filters.
     private var header: some View {
-        HStack {
-            Picker("Show", selection: $store.filter) {
-                ForEach(ProcessFilter.allCases) { f in
-                    Text(verbatim: "\(f == .ghosts ? "👻 " : "")\(f.rawValue)  \(store.count(f))").tag(f)
+        HStack(spacing: 8) {
+            Picker("View", selection: $store.tab) {
+                ForEach(ReaperTab.allCases) { t in
+                    Text(verbatim: "\(t.rawValue)  \(store.count(t))").monospacedDigit().tag(t)
                 }
             }
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            .help("Ghosts are processes whose agent session has ended")
-            Spacer()
-            Toggle("Listening only", isOn: $store.portsOnly)
-                .toggleStyle(.checkbox)
-                .font(.caption)
-            Button { store.refresh() } label: { Image(systemName: "arrow.clockwise") }
-                .buttonStyle(.borderless)
-                .help("Refresh now")
+
+            Spacer(minLength: 8)
+
+            Toggle(isOn: Binding(get: { store.filter == .ghosts }, set: { store.filter = $0 ? .ghosts : .all })) {
+                Text(verbatim: "👻 \(ghostCount)").monospacedDigit()
+            }
+            .toggleStyle(.button)
+            .help(store.tab == .processes
+                  ? "Show only ghosts: processes whose agent session has ended"
+                  : "Show only ghosts: worktrees whose folder is gone, or that nothing has used for \(Int(WorktreeScanner.staleAfter / 86_400)) days")
+
+            if store.tab == .processes {
+                Toggle(isOn: $store.portsOnly) {
+                    Label(String(store.listeningCount), systemImage: "antenna.radiowaves.left.and.right")
+                        .monospacedDigit()
+                }
+                .toggleStyle(.button)
+                .help("Show only processes listening on a port")
+            }
+
+            Button {
+                store.refresh()
+                store.refreshWorktrees(forceStatus: true)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("Refresh now")
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
+        .padding(.horizontal, 12).padding(.vertical, 10)
+    }
+
+    private var ghostCount: Int {
+        switch store.tab {
+        case .processes: store.jobs.filter(\.isGhost).count
+        case .worktrees: store.worktrees.filter(\.isGhost).count
+        }
+    }
+
+    private var summary: String {
+        switch store.tab {
+        case .processes:
+            let n = store.jobs.count
+            return n == 1 ? "1 process" : "\(n) processes"
+        case .worktrees:
+            let n = store.worktrees.count
+            var text = n == 1 ? "1 worktree" : "\(n) worktrees"
+            if store.visibleWorktreeSize > 0 {
+                text += " · \(formatSize(store.visibleWorktreeSize))\(store.filter == .ghosts ? " in ghosts" : "")"
+            }
+            return text
+        }
     }
 
     private var emptyState: some View {
@@ -68,7 +128,10 @@ struct ContentView: View {
     }
 
     private var emptyMessage: String {
-        switch (store.filter, store.portsOnly) {
+        if store.tab == .worktrees {
+            return store.filter == .ghosts ? "No ghost worktrees" : "No worktrees found"
+        }
+        return switch (store.filter, store.portsOnly) {
         case (.ghosts, true): "No ghost processes listening on a port"
         case (.ghosts, false): "No ghosts: nothing outlived its agent"
         case (.all, true): "No agent processes listening on a port"
@@ -78,17 +141,28 @@ struct ContentView: View {
 
     private var footer: some View {
         HStack {
-            Toggle("Launch at login", isOn: Binding(
-                get: { store.launchAtLogin }, set: { store.launchAtLogin = $0 }))
-                .toggleStyle(.checkbox)
+            Text(summary)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
             Spacer()
-            Text("⌥-click × to force kill").foregroundStyle(.tertiary)
-            Button("Quit") { NSApp.terminate(nil) }
-                .buttonStyle(.borderless)
-                .keyboardShortcut("q")
+            Menu {
+                Toggle("Launch at Login", isOn: Binding(
+                    get: { store.launchAtLogin }, set: { store.launchAtLogin = $0 }))
+                Divider()
+                Button("Quit Reaper") { NSApp.terminate(nil) }
+                    .keyboardShortcut("q")
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(store.tab == .processes ? "Options. Tip: ⌥-click × to force kill." : "Options. Tip: ⌥-click × to force remove.")
         }
-        .font(.caption)
-        .padding(.horizontal, 12).padding(.vertical, 7)
+        .font(.callout)
+        .padding(.horizontal, 12).padding(.vertical, 8)
+        // ⌘Q also works while the popover is open.
+        .background(Button("") { NSApp.terminate(nil) }.keyboardShortcut("q").hidden())
     }
 }
 
@@ -155,7 +229,7 @@ struct JobRow: View {
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 6) {
-                        if job.isGhost {
+                        if job.isGhost, store.filter != .ghosts {
                             Text("👻").help("Ghost: its agent session has ended and nothing is managing this process anymore")
                         }
                         Text(job.command)
@@ -169,21 +243,25 @@ struct JobRow: View {
                             Text(shortPath(cwd)).lineLimit(1).truncationMode(.head)
                             Text("·")
                         }
-                        Text(verbatim: "pid \(job.root.pid)")
-                        Text("·")
-                        Text(uptime(since: job.root.started))
-                        if let cpu = job.cpu {
+                        Group {
+                            Text(verbatim: "pid \(job.root.pid)")
                             Text("·")
-                            Text(verbatim: "\(formatCPU(cpu)) CPU")
+                            Text(uptime(since: job.root.started))
+                            if let cpu = job.cpu {
+                                Text("·")
+                                Text(verbatim: "\(formatCPU(cpu)) CPU")
+                            }
+                            if job.memory > 0 {
+                                Text("·")
+                                Text(verbatim: formatMemory(job.memory))
+                            }
+                            if let via = job.via {
+                                Text("· via \(via.rawValue)")
+                            }
                         }
-                        if job.memory > 0 {
-                            Text("·")
-                            Text(verbatim: formatMemory(job.memory))
-                        }
-                        if let via = job.via {
-                            Text("· via \(via.rawValue)")
-                        }
+                        .fixedSize()
                     }
+                    .lineLimit(1)
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
@@ -248,7 +326,7 @@ struct JobRow: View {
                         .help(p.args.joined(separator: " "))
                     Spacer(minLength: 4)
                     ForEach(Array(Set(p.ports.map(\.port))).sorted(), id: \.self) { port in
-                        Text(verbatim: ":\(port)").font(.caption.monospacedDigit()).foregroundStyle(job.harness.color)
+                        Text(verbatim: ":\(port)").font(.caption.monospacedDigit().weight(.medium))
                     }
                     // After the ports so the columns line up against the kill buttons.
                     Group {
@@ -306,8 +384,8 @@ struct PortChip: View {
             }
             .font(.system(.caption, design: .monospaced).weight(.medium))
             .padding(.horizontal, 6).padding(.vertical, 2)
-            .foregroundStyle(tint)
-            .background(Capsule().fill(tint.opacity(hovering ? 0.28 : 0.15)))
+            .foregroundStyle(.primary)
+            .background(Capsule().fill(hovering ? AnyShapeStyle(.tertiary) : AnyShapeStyle(.quaternary)))
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
@@ -335,7 +413,7 @@ private func openPort(_ port: UInt16) {
     if let url = URL(string: "http://localhost:\(port)") { NSWorkspace.shared.open(url) }
 }
 
-private func shortPath(_ path: String) -> String {
+func shortPath(_ path: String) -> String {
     let home = ProcessScanner.home
     return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
 }
@@ -356,5 +434,22 @@ private func uptime(since date: Date) -> String {
     case ..<3600: return "\(s / 60)m"
     case ..<86400: return "\(s / 3600)h \(s % 3600 / 60)m"
     default: return "\(s / 86400)d \(s % 86400 / 3600)h"
+    }
+}
+
+/// Disk size: "6.0 GB".
+func formatSize(_ bytes: UInt64) -> String {
+    Int64(clamping: bytes).formatted(.byteCount(style: .file))
+}
+
+/// Coarse age: "45s", "12m", "5h", "3d", "6w".
+func relativeAge(_ date: Date) -> String {
+    let s = max(0, Int(Date().timeIntervalSince(date)))
+    switch s {
+    case ..<60: return "\(s)s"
+    case ..<3600: return "\(s / 60)m"
+    case ..<86400: return "\(s / 3600)h"
+    case ..<(14 * 86400): return "\(s / 86400)d"
+    default: return "\(s / (7 * 86400))w"
     }
 }

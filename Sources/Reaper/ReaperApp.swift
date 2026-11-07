@@ -5,7 +5,9 @@ import SwiftUI
 @main
 enum Entry {
     static func main() {
-        if CommandLine.arguments.contains("--dump") {
+        if CommandLine.arguments.contains("--worktrees") {
+            dumpWorktrees()
+        } else if CommandLine.arguments.contains("--dump") {
             dump()
         } else {
             MainActor.assumeIsolated {
@@ -34,6 +36,32 @@ enum Entry {
             print("    cwd: \(job.cwd ?? "?")  procs: \(job.processes.count)  \(job.cpu.map(formatCPU) ?? "–") CPU  \(formatMemory(job.memory))")
         }
         print(String(format: "%d jobs, scan took %.0f ms", snap.jobs.count, Date().timeIntervalSince(start) * 1000))
+    }
+
+    /// Print detected worktrees; `--sizes` also measures disk usage (slow).
+    private static func dumpWorktrees() {
+        let scanner = WorktreeScanner()
+        var start = Date()
+        _ = scanner.scan()
+        let coldMS = Date().timeIntervalSince(start) * 1000
+        start = Date()
+        let worktrees = scanner.scan().sorted { ($0.repo, $0.path) < ($1.repo, $1.path) }
+        let warmMS = Date().timeIntervalSince(start) * 1000
+        let statuses = scanner.refreshStatuses(worktrees)
+        let measure = CommandLine.arguments.contains("--sizes")
+        for wt in worktrees {
+            let via = wt.via.map { " via \($0)" } ?? ""
+            let flags = [wt.isGhost ? "GHOST" : nil, wt.isPrunable ? "PRUNABLE" : nil, wt.isLocked ? "LOCKED" : nil,
+                         wt.inUse ? "IN USE (\(wt.processes.map(\.name).joined(separator: ", ")))" : nil]
+                .compactMap { $0 }.joined(separator: " ")
+            print("[\(wt.agent?.rawValue ?? "Other")\(via)] \(wt.repoName) \(wt.name) \(flags)")
+            let active = wt.lastActivity.map { relativeAge($0) + " ago" } ?? "never"
+            let status = statuses[wt.path].map { "\($0.changed) changed, \($0.unmerged) unmerged" } ?? "-"
+            let size = measure && !wt.isPrunable ? "  " + formatSize(DiskUsage.size(of: wt.path)) : ""
+            print("    \(wt.path)  active \(active)  \(status)\(size)")
+        }
+        print(String(format: "%d worktrees (%d ghosts), scan took %.0f ms cold, %.0f ms warm",
+                     worktrees.count, worktrees.filter(\.isGhost).count, coldMS, warmMS))
     }
 }
 
